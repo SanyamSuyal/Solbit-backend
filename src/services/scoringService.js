@@ -31,6 +31,18 @@ const GENERIC_QUERY_TERMS = new Set([
   "panel",
 ]);
 
+const ATOMIC_COMPONENT_TOKENS = [
+  "description",
+  "label",
+  "badge",
+  "title",
+  "icon",
+  "indicator",
+  "divider",
+  "separator",
+  "text",
+];
+
 const hasTermMatch = (text, term) => {
   if (!text || !term) {
     return false;
@@ -119,6 +131,7 @@ const computeComponentScore = (component, keywords, intentInfo = {}, modifiers =
 
   const qualityScore = Number(component.qualityScore) || 0;
   const popularity = Number(component.popularity) || 0;
+  const normalizedName = normalizeText(component.name || "");
 
   const queryTerms = buildQueryTerms(keywords, modifiers, intentInfo);
   const corpusFields = [
@@ -141,6 +154,10 @@ const computeComponentScore = (component, keywords, intentInfo = {}, modifiers =
   }
 
   const nonIntentPenalty = exactPatternMatch === 0 && partialPatternMatch === 0 ? -30 : 0;
+
+  const sectionLikeIntent = ["section", "hero", "navbar", "sidebar", "table", "card", "tabs", "layout"].includes(primaryIntent);
+  const isAtomicPrimitive = ATOMIC_COMPONENT_TOKENS.some((token) => hasTermMatch(normalizedName, token));
+  const atomicPenalty = sectionLikeIntent && isAtomicPrimitive ? -18 : 0;
   
   // CRITICAL FIX: Enforce intent dominance and cap quality/popularity influence
   // Intent match now worth 50 points (increased from 30) to ensure UI-relevant components rank higher
@@ -168,6 +185,7 @@ const computeComponentScore = (component, keywords, intentInfo = {}, modifiers =
     popularityCapped +
     lexicalPenalty +
     nonIntentPenalty +
+    atomicPenalty +
     logicPenalty;
 
   return {
@@ -186,6 +204,7 @@ const computeComponentScore = (component, keywords, intentInfo = {}, modifiers =
       lexicalMatchCount,
       lexicalPenalty,
       nonIntentPenalty,
+      atomicPenalty,
       logicPenalty,
     },
   };

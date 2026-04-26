@@ -2,7 +2,7 @@ const { normalizeText } = require("./promptService");
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const DEFAULT_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
-const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.GROQ_TIMEOUT_MS || "6000", 10);
+const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.GROQ_BUILDER_TIMEOUT_MS || process.env.GROQ_TIMEOUT_MS || "12000", 10);
 
 const LLM_CALL_SYSTEM_PROMPT = [
   "You are a senior frontend engineer generating production-ready component code.",
@@ -123,6 +123,15 @@ const buildLlmCallPayload = ({ userPrompt, intentInfo, projectContext, best, alt
   };
 };
 
+const compactPromptGuide = (promptGuide) => {
+  return {
+    role: promptGuide?.role,
+    theme_rules: promptGuide?.theme_rules,
+    output_contract: promptGuide?.output_contract,
+    execute: promptGuide?.execute,
+  };
+};
+
 const fallbackPrompt = ({ userPrompt, intentInfo, best, projectContext }) => {
   return buildExecutionPromptText({
     userPrompt,
@@ -159,15 +168,7 @@ const generateBuilderPromptWithGroq = async ({
     project_context: projectContext,
     selected_reference: compactComponent(best),
     alternative_references: Array.isArray(alternatives) ? alternatives.slice(0, 2).map(compactComponent) : [],
-    prompt_guide: {
-      role: promptGuide?.role,
-      thinking_protocol: promptGuide?.thinking_protocol,
-      how_to_use_reference_components: promptGuide?.how_to_use_reference_components,
-      theme_rules: promptGuide?.theme_rules,
-      output_contract: promptGuide?.output_contract,
-      self_critique_protocol: promptGuide?.self_critique_protocol,
-      execute: promptGuide?.execute,
-    },
+    prompt_guide: compactPromptGuide(promptGuide),
   };
 
   try {
