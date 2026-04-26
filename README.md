@@ -52,6 +52,7 @@ npm start
 
 - `PORT` (default: `3000`)
 - `MONGODB_URI` (required in production)
+- `MONGODB_DB_NAME` (default: `solbit`)
 - `API_KEYS` (required in production, comma-separated)
 - `GROQ_API_KEY` (required for `/generate` intent parsing)
 - `GROQ_MODEL` (default: `llama-3.1-8b-instant`)
@@ -127,6 +128,26 @@ Response format:
 	"generated_prompt": {
 		"source": "groq",
 		"text": "Prompt text for the caller AI to execute"
+	},
+	"llm_call": {
+		"model_role": "code_generation",
+		"system": "System instruction for coding LLM",
+		"user": "Execution prompt for coding LLM",
+		"prompt_rules": { "role": "...", "execute": "..." },
+		"project_context": { "framework": "nextjs", "styling": "tailwind" },
+		"component_context": {
+			"best": {
+				"name": "...",
+				"code": "...",
+				"props": [],
+				"dependencies": []
+			},
+			"alternatives": []
+		},
+		"request_context": {
+			"user_prompt": "modern dashboard sidebar with dark mode",
+			"intent": { "primary": "sidebar" }
+		}
 	},
 	"prompt_guide": {
 		"role": "...",
@@ -207,6 +228,8 @@ curl -X POST https://<your-render-url>/api/v1/search \
 ```
 
 Expected: response includes `best`, `results`, `generated_prompt`, and `prompt_guide`.
+
+`llm_call` is intended to be sent directly to your downstream coding model. It includes the execution prompt plus full component code/data context (`component_context.best` and `component_context.alternatives`).
 
 ## CLI Usage Example
 

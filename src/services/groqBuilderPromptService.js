@@ -4,6 +4,13 @@ const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const DEFAULT_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.GROQ_TIMEOUT_MS || "6000", 10);
 
+const LLM_CALL_SYSTEM_PROMPT = [
+  "You are a senior frontend engineer generating production-ready component code.",
+  "Return complete files only, with no TODO/FIXME placeholders and no ellipses.",
+  "Use provided component context as the primary structural base and adapt it to the user request.",
+  "Respect theme values from project_context and keep output accessible with loading/empty/error states.",
+].join(" ");
+
 const createServiceError = (message, statusCode = 503) => {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -15,6 +22,13 @@ const compactComponent = (component) => {
     return null;
   }
 
+  const code = String(component.code || "");
+  const codeLines = code
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean);
+  const codeExcerpt = codeLines.slice(0, 120).join("\n").slice(0, 6000);
+
   return {
     name: component.name,
     description: normalizeText(component.description || "").slice(0, 400),
@@ -22,28 +36,105 @@ const compactComponent = (component) => {
     dependencies: Array.isArray(component.dependencies) ? component.dependencies.slice(0, 12) : [],
     usage: normalizeText(component.usage || "").slice(0, 600),
     props: Array.isArray(component.props) ? component.props.slice(0, 20) : [],
+    code_excerpt: codeExcerpt,
+  };
+};
+
+const isLikelyCodeInsteadOfPrompt = (value) => {
+  const text = String(value || "").trim();
+  if (!text) {
+    return true;
+  }
+
+  const codeSignals = [
+    /```/,
+    /\bimport\s+.+\s+from\s+['"][^'"]+['"]/,
+    /\bexport\s+default\b/,
+    /\bmodule\.exports\b/,
+    /\bfunction\s+[A-Za-z0-9_]+\s*\(/,
+    /\bconst\s+[A-Za-z0-9_]+\s*=\s*\(/,
+    /<\/?[A-Za-z][^>]*>/,
+  ];
+
+  return codeSignals.some((pattern) => pattern.test(text));
+};
+
+const buildExecutionPromptText = ({ userPrompt, intentInfo, projectContext, best, alternatives, promptGuide }) => {
+  const theme = projectContext?.theme || {};
+  const spacing = theme.spacing || {};
+
+  return [
+    "TASK",
+    `Build the component requested by the user: \"${userPrompt}\".`,
+    "",
+    "INTENT",
+    `- Primary: ${intentInfo?.primary || "section"}`,
+    `- Secondary: ${intentInfo?.secondary || "none"}`,
+    `- Features: ${(intentInfo?.features || []).join(", ") || "none"}`,
+    "",
+    "REFERENCE COMPONENTS",
+    "- Use component_context.best as the main base.",
+    "- Use component_context.alternatives for patterns and edge-case support.",
+    "- Never copy-paste blindly; adapt structure to the exact user request.",
+    "",
+    "THEME RULES",
+    `- Primary: ${theme.primary || "#6366f1"}`,
+    `- Background: ${theme.background || "#ffffff"}`,
+    `- Text: ${theme.text || "#111827"}`,
+    `- Border: ${theme.border || "#e5e7eb"}`,
+    `- Body font: ${theme?.fonts?.body || "Inter, system-ui, sans-serif"}`,
+    `- Spacing sm/md/lg: ${spacing.sm || "8px"}, ${spacing.md || "12px"}, ${spacing.lg || "16px"}`,
+    `- Border radius: ${theme.borderRadius || "8px"}`,
+    `- Dark mode enabled: ${Boolean(theme.darkMode)}`,
+    "",
+    "OUTPUT REQUIREMENTS",
+    "- Return complete production-ready code files only.",
+    "- Include imports, component code, and any styles needed.",
+    "- Handle loading, empty, error, and disabled states where relevant.",
+    "- Add accessibility attributes and keyboard-safe interactions.",
+    "- If TypeScript is enabled, include explicit prop/function/return types.",
+    "",
+    "PROMPT GUIDE EXECUTION",
+    `- Follow prompt_guide.role: ${promptGuide?.role || "N/A"}`,
+    `- Follow prompt_guide.execute: ${promptGuide?.execute || "N/A"}`,
+    "",
+    "CONSTRAINT",
+    "- Do not ask follow-up questions. Make reasonable production decisions and ship.",
+  ].join("\n");
+};
+
+const buildLlmCallPayload = ({ userPrompt, intentInfo, projectContext, best, alternatives, promptGuide, generatedPrompt }) => {
+  const promptText = String(generatedPrompt || "").trim();
+
+  return {
+    model_role: "code_generation",
+    system: LLM_CALL_SYSTEM_PROMPT,
+    user: promptText,
+    prompt_rules: promptGuide,
+    project_context: projectContext,
+    component_context: {
+      best: best || null,
+      alternatives: Array.isArray(alternatives) ? alternatives : [],
+    },
+    request_context: {
+      user_prompt: userPrompt,
+      intent: intentInfo,
+    },
   };
 };
 
 const fallbackPrompt = ({ userPrompt, intentInfo, best, projectContext }) => {
-  const theme = projectContext?.theme || {};
-  return [
-    "You are a senior frontend engineer. Build the requested UI component as production-ready code.",
-    `User request: ${userPrompt}`,
-    `Primary intent: ${intentInfo?.primary || "section"}`,
-    `Secondary context: ${intentInfo?.secondary || "none"}`,
-    `Features: ${(intentInfo?.features || []).join(", ") || "none"}`,
-    "Reference component:",
-    `- Name: ${best?.name || "N/A"}`,
-    `- Import path: ${best?.import || "N/A"}`,
-    "Implementation rules:",
-    "1) Use the reference component structure, adapt to user request.",
-    "2) Do not copy blindly; preserve reusable structure and improve UX.",
-    "3) Use project theme values only; no hardcoded colors.",
-    `4) Theme primary=${theme.primary || "#6366f1"}, bg=${theme.background || "#ffffff"}, text=${theme.text || "#111827"}, border=${theme.border || "#e5e7eb"}.`,
-    "5) Include accessible labels/keyboard support and loading/empty/error states.",
-    "6) Return complete production-ready files with no TODOs.",
-  ].join("\n");
+  return buildExecutionPromptText({
+    userPrompt,
+    intentInfo,
+    best,
+    alternatives: [],
+    projectContext,
+    promptGuide: {
+      role: "You are a senior frontend engineer shipping complete component code.",
+      execute: "Build from the reference context and return complete files.",
+    },
+  });
 };
 
 const generateBuilderPromptWithGroq = async ({
@@ -100,7 +191,7 @@ const generateBuilderPromptWithGroq = async ({
             content: [
               "Write one detailed implementation prompt for a coding AI.",
               "The prompt must be production-focused, specific, and executable immediately.",
-              "It must reference the selected component details, real theme values, required states, accessibility, and strict quality constraints.",
+              "It must reference the selected component details, code excerpt context, real theme values, required states, accessibility, and strict quality constraints.",
               "Return prompt text only.",
               JSON.stringify(payload),
             ].join("\n\n"),
@@ -139,4 +230,7 @@ const generateBuilderPromptWithGroq = async ({
 module.exports = {
   generateBuilderPromptWithGroq,
   fallbackPrompt,
+  buildExecutionPromptText,
+  buildLlmCallPayload,
+  isLikelyCodeInsteadOfPrompt,
 };
