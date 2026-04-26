@@ -1,0 +1,40 @@
+{
+  "name": "solbit-backend",
+  "version": "1.0.0",
+  "description": "Solbit backend API for AI-optimized UI component retrieval",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "NODE_ENV=development node src/server.js",
+    "test": "echo \"No automated tests configured yet\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SanyamSuyal/Solbit-backend.git"
+  },
+  "keywords": [
+    "express",
+    "mongodb",
+    "ai",
+    "api"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "bugs": {
+    "url": "https://github.com/SanyamSuyal/Solbit-backend/issues"
+  },
+  "homepage": "https://github.com/SanyamSuyal/Solbit-backend#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^8.4.1",
+    "helmet": "^8.1.0",
+    "mongoose": "^9.5.0"
+  }
+}
