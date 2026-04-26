@@ -13,6 +13,24 @@ const normalizeArray = (values) => {
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const GENERIC_QUERY_TERMS = new Set([
+  "ui",
+  "component",
+  "components",
+  "section",
+  "layout",
+  "page",
+  "dashboard",
+  "responsive",
+  "modern",
+  "saas",
+  "inside",
+  "with",
+  "form",
+  "input",
+  "panel",
+]);
+
 const hasTermMatch = (text, term) => {
   if (!text || !term) {
     return false;
@@ -20,6 +38,41 @@ const hasTermMatch = (text, term) => {
   const escaped = escapeRegex(term);
   const matcher = new RegExp(`(?:^|\\s)${escaped}(?:$|\\s)`);
   return matcher.test(` ${text} `);
+};
+
+const buildQueryTerms = (keywords, modifiers, intentInfo) => {
+  const featureTerms = Array.isArray(intentInfo?.features)
+    ? intentInfo.features.map((value) => normalizeText(value)).filter(Boolean)
+    : [];
+
+  const modifierTerms = Array.isArray(modifiers)
+    ? modifiers.map((value) => normalizeText(value)).filter(Boolean)
+    : [];
+
+  const secondaryTerms = normalizeText(intentInfo?.secondary || "")
+    .split(/\s+/)
+    .map((value) => normalizeText(value))
+    .filter((value) => value.length >= 3);
+
+  return Array.from(new Set([
+    ...(Array.isArray(keywords) ? keywords : []),
+    ...modifierTerms,
+    ...featureTerms,
+    ...secondaryTerms,
+  ]
+    .map((value) => normalizeText(value))
+    .filter((value) => value.length >= 3)
+    .filter((value) => !GENERIC_QUERY_TERMS.has(value))));
+};
+
+const countTermMatchesAcrossFields = (terms, fields) => {
+  if (!terms.length) {
+    return 0;
+  }
+
+  return terms.reduce((count, term) => {
+    return fields.some((field) => hasTermMatch(field, term)) ? count + 1 : count;
+  }, 0);
 };
 
 const computeComponentScore = (component, keywords, intentInfo = {}, modifiers = []) => {
@@ -66,6 +119,28 @@ const computeComponentScore = (component, keywords, intentInfo = {}, modifiers =
 
   const qualityScore = Number(component.qualityScore) || 0;
   const popularity = Number(component.popularity) || 0;
+
+  const queryTerms = buildQueryTerms(keywords, modifiers, intentInfo);
+  const corpusFields = [
+    normalizeText(component.name || ""),
+    normalizedSearchText,
+    normalizeText(component.description || ""),
+    ...semanticTags,
+  ];
+
+  const lexicalMatchCount = countTermMatchesAcrossFields(queryTerms, corpusFields);
+  const lexicalMatchBoost = Math.min(lexicalMatchCount, 3) * 6;
+
+  let lexicalPenalty = 0;
+  if (queryTerms.length > 0) {
+    if (lexicalMatchCount === 0) {
+      lexicalPenalty = -55;
+    } else if (lexicalMatchCount === 1) {
+      lexicalPenalty = -20;
+    }
+  }
+
+  const nonIntentPenalty = exactPatternMatch === 0 && partialPatternMatch === 0 ? -30 : 0;
   
   // CRITICAL FIX: Enforce intent dominance and cap quality/popularity influence
   // Intent match now worth 50 points (increased from 30) to ensure UI-relevant components rank higher
@@ -76,12 +151,14 @@ const computeComponentScore = (component, keywords, intentInfo = {}, modifiers =
   const qualityCapped = Math.min(qualityScore * 0.1, 10);
   const popularityCapped = Math.min(popularity * 0.05, 5);
   
-  // Penalize logic/developer-tool components to prioritize UI components
-  const logicPenalty = component.componentClass === "logic" ? -25 : 0;
+  // Penalize logic/developer-tool components to prioritize UI components unless user explicitly asks for logic/editor work.
+  const isLogicIntent = ["logic", "editor", "viewer"].includes(primaryIntent);
+  const logicPenalty = component.componentClass === "logic" && !isLogicIntent ? -40 : 0;
 
   const score =
     exactPatternBoost +
     partialPatternBoost +
+    lexicalMatchBoost +
     semanticMatchCount * 8 +
     searchTextMatches * 5 +
     secondaryMatch * 6 +
@@ -89,6 +166,8 @@ const computeComponentScore = (component, keywords, intentInfo = {}, modifiers =
     modifierMatchCount * 2 +
     qualityCapped +
     popularityCapped +
+    lexicalPenalty +
+    nonIntentPenalty +
     logicPenalty;
 
   return {
@@ -104,6 +183,9 @@ const computeComponentScore = (component, keywords, intentInfo = {}, modifiers =
       searchTextMatches,
       qualityScore,
       popularity,
+      lexicalMatchCount,
+      lexicalPenalty,
+      nonIntentPenalty,
       logicPenalty,
     },
   };

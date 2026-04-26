@@ -5,6 +5,62 @@ const { normalizeText } = require("./promptService");
 const AI_SELECTION_POOL_SIZE = 12;
 const RESPONSE_RESULT_COUNT = 5;
 
+const PROMPT_PATTERN_HINTS = {
+  pricing: "section",
+  plan: "section",
+  plans: "section",
+  cta: "section",
+  call: "section",
+  hero: "hero",
+  dashboard: "dashboard",
+  analytics: "chart",
+  chart: "chart",
+  graph: "chart",
+  heatmap: "chart",
+  risk: "chart",
+  metric: "chart",
+  table: "table",
+  grid: "table",
+  data: "table",
+  invoice: "table",
+  reconciliation: "table",
+  queue: "table",
+  review: "table",
+  upload: "form",
+  document: "form",
+  verification: "form",
+  kyc: "form",
+  wizard: "tabs",
+  stepper: "tabs",
+  login: "form",
+  signup: "form",
+  sign: "form",
+  input: "form",
+  email: "form",
+  password: "form",
+  otp: "form",
+  modal: "modal",
+  dialog: "modal",
+  popup: "modal",
+  sidebar: "sidebar",
+  sidenav: "sidebar",
+  navbar: "navbar",
+  navigation: "navbar",
+  menu: "dropdown",
+  dropdown: "dropdown",
+  tab: "tabs",
+  tabs: "tabs",
+  card: "card",
+  cards: "card",
+  loader: "loader",
+  skeleton: "loader",
+  badge: "badge",
+  editor: "editor",
+  viewer: "viewer",
+  preview: "viewer",
+  layout: "layout",
+};
+
 const METADATA_PROJECTION =
   "name description import usage dependencies semanticTags searchText tags uiPattern qualityScore popularity importStatement importSource usageExample componentNature componentClass category subCategory componentType componentRole complexity useCases";
 
@@ -21,6 +77,56 @@ const normalizeStyling = (styling) => {
   }
 
   return styling;
+};
+
+const uniqueNonEmpty = (values) => {
+  const seen = new Set();
+  const out = [];
+
+  for (const value of values) {
+    const normalized = normalizeText(value);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  }
+
+  return out;
+};
+
+const buildPatternCandidates = ({ prompt, intentInfo, keywords }) => {
+  const primary = normalizeText(intentInfo?.primary || "");
+  const secondary = normalizeText(intentInfo?.secondary || "");
+  const normalizedPrompt = normalizeText(prompt);
+
+  const hintedPatterns = [];
+
+  for (const token of uniqueNonEmpty([...(keywords || []), ...normalizedPrompt.split(/\s+/)])) {
+    const mapped = PROMPT_PATTERN_HINTS[token];
+    if (mapped) {
+      hintedPatterns.push(mapped);
+    }
+  }
+
+  const candidates = uniqueNonEmpty([
+    primary,
+    secondary,
+    ...hintedPatterns,
+  ]);
+
+  if (candidates.length > 0) {
+    return candidates;
+  }
+
+  return [primary || "section"];
+};
+
+const buildKeywordRegexes = (keywords) => {
+  return uniqueNonEmpty(keywords)
+    .filter((token) => token.length >= 3)
+    .slice(0, 8)
+    .map((token) => new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
 };
 
 const buildWhyThis = (component, scoreDetails) => {
@@ -154,35 +260,77 @@ const retrieveComponents = async ({ prompt, keywords, intentInfo, modifiers, fra
     };
   }
 
-  const query = {
-    isValidComponent: true,
-    uiPattern: primaryIntent,
-  };
-
-  if (framework) {
-    query.framework = framework;
-  }
-
+  const patternCandidates = buildPatternCandidates({ prompt, intentInfo, keywords });
   const normalizedStyling = normalizeStyling(styling);
+  const keywordRegexes = buildKeywordRegexes([...(keywords || []), ...(modifiers || []), primaryIntent]);
 
-  if (normalizedStyling) {
-    query.styling = normalizedStyling;
-  }
-
-  let candidates = await Component.find(query)
-    .select(METADATA_PROJECTION)
-    .limit(300)
-    .lean();
-
-  // Keep strict uiPattern matching but relax framework/styling if needed.
-  if (candidates.length === 0) {
-    candidates = await Component.find({
+  const stageQueries = [
+    {
       isValidComponent: true,
       uiPattern: primaryIntent,
-    })
+      ...(framework ? { framework } : {}),
+      ...(normalizedStyling ? { styling: normalizedStyling } : {}),
+    },
+    {
+      isValidComponent: true,
+      uiPattern: { $in: patternCandidates },
+      ...(framework ? { framework } : {}),
+    },
+    {
+      isValidComponent: true,
+      uiPattern: { $in: patternCandidates },
+    },
+    {
+      isValidComponent: true,
+      $or: [
+        { uiPattern: { $in: patternCandidates } },
+        ...(keywordRegexes.length > 0 ? [{ name: { $in: keywordRegexes } }] : []),
+        ...(keywordRegexes.length > 0 ? [{ description: { $in: keywordRegexes } }] : []),
+        ...(keywordRegexes.length > 0 ? [{ searchText: { $in: keywordRegexes } }] : []),
+        ...(keywordRegexes.length > 0 ? [{ semanticTags: { $in: keywordRegexes } }] : []),
+      ],
+    },
+  ];
+
+  let candidates = [];
+  let stageUsed = -1;
+  const seenCandidateIds = new Set();
+
+  for (let index = 0; index < stageQueries.length; index += 1) {
+    const query = stageQueries[index];
+    const batch = await Component.find(query)
       .select(METADATA_PROJECTION)
-      .limit(300)
+      .limit(400)
       .lean();
+
+    if (batch.length === 0) {
+      continue;
+    }
+
+    if (stageUsed === -1) {
+      stageUsed = index;
+    }
+
+    for (const item of batch) {
+      const key = String(item._id || "");
+      if (!key || seenCandidateIds.has(key)) {
+        continue;
+      }
+      seenCandidateIds.add(key);
+      candidates.push(item);
+    }
+
+    if (candidates.length >= 500) {
+      break;
+    }
+  }
+
+  if (candidates.length === 0) {
+    candidates = await Component.find({ isValidComponent: true })
+      .select(METADATA_PROJECTION)
+      .limit(500)
+      .lean();
+    stageUsed = stageQueries.length;
   }
 
   const totalMatchesAfterPrimaryFilter = candidates.length;
@@ -241,8 +389,19 @@ const retrieveComponents = async ({ prompt, keywords, intentInfo, modifiers, fra
 
   const resultCount = aiSelectionPoolRanked.length === 0 ? 0 : Math.min(RESPONSE_RESULT_COUNT, Math.max(3, aiSelectionPoolRanked.length));
   const selected = aiSelectionPoolRanked.slice(0, resultCount);
-  const bestRanked = selected[0] || null;
-  const alternativeRanked = selectDiverseAlternatives(selected, 4);
+  let bestRanked = selected[0] || null;
+  let alternativeRanked = selectDiverseAlternatives(selected, 4);
+
+  const isLowConfidenceTopResult = bestRanked &&
+    (bestRanked.details?.lexicalMatchCount || 0) === 0 &&
+    (bestRanked.details?.semanticMatchCount || 0) === 0 &&
+    (bestRanked.details?.searchTextMatches || 0) === 0 &&
+    (bestRanked.details?.featureMatchCount || 0) === 0;
+
+  if (isLowConfidenceTopResult) {
+    bestRanked = null;
+    alternativeRanked = [];
+  }
 
   if (process.env.NODE_ENV !== "production") {
     // Debug: Show ranking results and component scores
@@ -267,6 +426,8 @@ const retrieveComponents = async ({ prompt, keywords, intentInfo, modifiers, fra
       JSON.stringify({
         prompt,
         extractedIntent: intentInfo,
+        patternCandidates,
+        stageUsed,
         keywords,
         totalMatchesAfterPrimaryFilter,
         modifiers,

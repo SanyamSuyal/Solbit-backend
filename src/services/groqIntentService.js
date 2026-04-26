@@ -1,4 +1,4 @@
-const { normalizeText } = require("./promptService");
+const { normalizeText, extractIntent } = require("./promptService");
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const DEFAULT_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
@@ -39,6 +39,14 @@ const PRIMARY_CANONICAL_MAP = {
   previewer: "viewer",
   codeviewer: "viewer",
   inspector: "viewer",
+  wizard: "tabs",
+  stepper: "tabs",
+  multistep: "tabs",
+  multistepform: "form",
+  kyc: "form",
+  invoice: "table",
+  reconciliation: "table",
+  heatmap: "chart",
 };
 
 const ALLOWED_PRIMARY = new Set([
@@ -122,6 +130,94 @@ const normalizeIntentObject = (payload) => {
     primary,
     secondary,
     features,
+  };
+};
+
+const alignIntentToPrompt = (prompt, intent) => {
+  const normalizedPrompt = normalizeText(prompt);
+  const promptTerms = new Set(
+    normalizedPrompt
+      .split(/\s+/)
+      .map((token) => normalizeText(token))
+      .filter((token) => token.length >= 3)
+  );
+
+  const alignedFeatures = (intent.features || []).filter((feature) => {
+    const featureTerms = normalizeText(feature)
+      .split(/\s+/)
+      .filter((token) => token.length >= 3);
+
+    if (featureTerms.length === 0) {
+      return false;
+    }
+
+    return featureTerms.some((term) => promptTerms.has(term));
+  });
+
+  let secondary = intent.secondary;
+  if (secondary) {
+    const secondaryTerms = normalizeText(secondary)
+      .split(/\s+/)
+      .filter((token) => token.length >= 3);
+
+    const secondaryHasPromptOverlap = secondaryTerms.some((term) => promptTerms.has(term));
+    if (!secondaryHasPromptOverlap) {
+      secondary = null;
+    }
+  }
+
+  return {
+    primary: intent.primary,
+    secondary,
+    features: normalizeFeatures(alignedFeatures),
+  };
+};
+
+const LOCAL_FEATURE_TOKENS = [
+  "search",
+  "filter",
+  "email",
+  "password",
+  "otp",
+  "input",
+  "table",
+  "chart",
+  "cards",
+  "cta",
+  "pricing",
+  "dark mode",
+  "responsive",
+  "pagination",
+  "tabs",
+  "modal",
+  "dropdown",
+];
+
+const deriveLocalIntentFallback = (prompt) => {
+  const normalizedPrompt = normalizeText(prompt);
+  const rawPrimary = extractIntent(normalizedPrompt) || "section";
+  const primary = canonicalizePrimary(rawPrimary);
+
+  let secondary = null;
+  if (/\b(sidebar|sidenav)\b/.test(normalizedPrompt) && primary !== "sidebar") {
+    secondary = "sidebar";
+  } else if (/\b(navbar|top nav|topbar|navigation)\b/.test(normalizedPrompt) && primary !== "navbar") {
+    secondary = "navbar";
+  } else if (/\bdashboard\b/.test(normalizedPrompt) && primary !== "dashboard") {
+    secondary = "dashboard";
+  }
+
+  const features = LOCAL_FEATURE_TOKENS.filter((token) => {
+    if (token.includes(" ")) {
+      return normalizedPrompt.includes(token);
+    }
+    return new RegExp(`\\b${token.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`).test(normalizedPrompt);
+  });
+
+  return {
+    primary,
+    secondary,
+    features: normalizeFeatures(features),
   };
 };
 
@@ -224,7 +320,7 @@ const buildPrompt = (prompt) => {
 const parseIntentWithGroq = async (prompt) => {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    throw createServiceError("Groq intent parser is not configured. Set GROQ_API_KEY.", 503);
+    return applyPrimaryPurposeGuard(prompt, deriveLocalIntentFallback(prompt));
   }
 
   const controller = new AbortController();
@@ -272,21 +368,14 @@ const parseIntentWithGroq = async (prompt) => {
     const parsed = safeParseJson(cleaned);
 
     if (!parsed) {
-      throw createServiceError("Groq intent parser returned invalid JSON.", 502);
+      return applyPrimaryPurposeGuard(prompt, deriveLocalIntentFallback(prompt));
     }
 
     const normalizedIntent = normalizeIntentObject(parsed);
-    return applyPrimaryPurposeGuard(prompt, normalizedIntent);
+    const promptAlignedIntent = alignIntentToPrompt(prompt, normalizedIntent);
+    return applyPrimaryPurposeGuard(prompt, promptAlignedIntent);
   } catch (error) {
-    if (error?.name === "AbortError") {
-      throw createServiceError("Groq intent parser timed out.", 504);
-    }
-
-    if (typeof error?.statusCode === "number") {
-      throw error;
-    }
-
-    throw createServiceError("Groq intent parser failed.", 502);
+    return applyPrimaryPurposeGuard(prompt, deriveLocalIntentFallback(prompt));
   } finally {
     clearTimeout(timeoutHandle);
   }
